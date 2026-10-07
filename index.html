@@ -31,6 +31,12 @@
 .btn-small:hover{background:#f4f6f8}
 .btn-danger{color:#b42318;border-color:#f0b8b4}
 .btn-success{color:#067647;border-color:#a7d7bf}
+.inactive-row{opacity:.58}
+    .management-list{max-height:55vh;overflow:auto;border:1px solid #e5e9f2;border-radius:10px}
+    .management-row{display:grid;grid-template-columns:70px 1fr auto;gap:10px;align-items:center;padding:9px 10px;border-bottom:1px solid #edf0f5}
+    .management-row:last-child{border-bottom:0}
+    .status-pill{font-size:12px;font-weight:700}
+    @media(max-width:760px){.management-row{grid-template-columns:55px 1fr auto}}
 </style>
 </head>
 <body>
@@ -66,7 +72,7 @@
     <section id="stockTab" class="panel">
       <div class="toolbar">
         <input id="search" placeholder="Pesquisar por número ou nome...">
-        <button id="newProductBtn" class="primary">+ Novo produto</button>
+        <button id="manageNumbersBtn">⚙ Gerir números</button>
       </div>
       <table>
         <thead><tr><th>N.º</th><th>Nome</th><th>Stock</th><th>Mínimo</th><th>Estado</th><th>Ações</th></tr></thead>
@@ -97,25 +103,13 @@
   </div>
 </div>
 
-<div id="productModal" class="modal hidden">
-  <div class="panel">
-    <h2>Novo produto</h2>
-    <div class="field"><label>Número (0–220)</label><input id="productNumber" type="number" min="0" max="220"></div>
-    <div class="field"><label>Nome</label><input id="productName"></div>
-    <div class="field"><label>Stock inicial</label><input id="productStock" type="number" min="0" value="0"></div>
-    <div class="field"><label>Stock mínimo</label><input id="productMin" type="number" min="0" value="0"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end"><button id="cancelProduct">Cancelar</button><button id="saveProduct" class="primary">Criar</button></div>
-    <div id="productMsg" class="msg"></div>
-  </div>
-</div>
-
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const SUPABASE_URL = "https://lbqrpfriitsxoctkvzms.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_wnjPHxBWGXLKpcsX9bJOcg_Y-9lyavw";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-let currentUser = null, movementProduct = null, movementType = null, products = [];
+let currentUser = null, movementProduct = null, movementType = null, products = [], showInactive = false;
 
 const $ = id => document.getElementById(id);
 function msg(id, text, ok=false){ $(id).textContent=text; $(id).className="msg "+(ok?"success":"error"); }
@@ -140,24 +134,33 @@ $("loginBtn").onclick=async()=>{
 $("logoutBtn").onclick=()=>sb.auth.signOut();
 
 async function loadProducts(){
-  const {data,error}=await sb.from("products").select("*").eq("ativo",true).order("numero");
+  const {data,error}=await sb.from("products").select("*").order("numero");
   if(error){ alert(error.message); return; }
-  products=data||[]; renderProducts();
+  products=data||[];
+  renderProducts();
 }
 function renderProducts(){
   const q=$("search").value.trim().toLowerCase();
-  const rows=products.filter(p=>String(p.numero).includes(q)||(p.nome||"").toLowerCase().includes(q));
+  const rows=products.filter(p=>(showInactive || p.ativo) && (String(p.numero).includes(q)||(p.nome||"").toLowerCase().includes(q)));
   $("stockBody").innerHTML=rows.map(p=>{
-    const low=p.stock<=p.stock_minimo;
+    const low=p.stock_minimo > 0 && p.stock < p.stock_minimo;
     return `<tr>
-      <td>${p.numero}</td><td>${escapeHtml(p.nome||"—")}</td><td><b>${p.stock}</b></td><td>${p.stock_minimo}</td>
+      <td>${p.numero}</td>
+      <td>${escapeHtml(p.nome||"—")}</td>
+      <td><b>${p.stock}</b></td>
+      <td>${p.stock_minimo}</td>
       <td class="${low?'low':'ok'}">${low?'⚠ Repor':'✓ OK'}</td>
-      <td class="actions"><button onclick="openMovement(${p.id},'entrada')">+ Entrada</button><button onclick="openMovement(${p.id},'saida')">− Saída</button></td>
+      <td class="actions">
+        <button onclick="openMovement(${p.id},'entrada')">+ Entrada</button>
+        <button onclick="openMovement(${p.id},'saida')">− Saída</button>
+        <button onclick="openEditProductById(${p.id})">✏ Editar</button>
+        <button class="${p.ativo?'danger':''}" onclick="toggleProductById(${p.id})">${p.ativo?'Desativar':'Ativar'}</button>
+      </td>
     </tr>`;
   }).join("");
   $("totalProducts").textContent=products.length;
   $("totalStock").textContent=products.reduce((s,p)=>s+p.stock,0);
-  $("lowStock").textContent=products.filter(p=>p.stock<=p.stock_minimo).length;
+  $("lowStock").textContent=products.filter(p=>p.stock_minimo > 0 && p.stock < p.stock_minimo).length;
 }
 $("search").oninput=renderProducts;
 
@@ -177,15 +180,6 @@ $("confirmModal").onclick=async()=>{
   if(!$("historyTab").classList.contains("hidden")) loadHistory();
 };
 
-$("newProductBtn").onclick=()=>{$("productNumber").value="";$("productName").value="";$("productStock").value="0";$("productMin").value="0";msg("productMsg","");$("productModal").classList.remove("hidden")};
-$("cancelProduct").onclick=()=>$("productModal").classList.add("hidden");
-$("saveProduct").onclick=async()=>{
-  const numero=parseInt($("productNumber").value,10), nome=$("productName").value.trim(), stock=parseInt($("productStock").value,10)||0, stock_minimo=parseInt($("productMin").value,10)||0;
-  if(Number.isNaN(numero)||numero<0||numero>220){msg("productMsg","O número deve estar entre 0 e 220.");return}
-  const {error}=await sb.from("products").insert({numero,nome,stock,stock_minimo});
-  if(error){msg("productMsg",error.message);return}
-  $("productModal").classList.add("hidden"); await loadProducts();
-};
 
 document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); b.classList.add("active");
@@ -211,6 +205,19 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":
 init();
 </script>
 
+
+<div id="managementModal" class="modal hidden">
+  <div class="panel" style="width:min(650px,100%)">
+    <h2>Gerir números 0–220</h2>
+    <p class="muted">Os números podem ser ativados ou desativados sem apagar o histórico.</p>
+    <div class="field"><input id="managementSearch" placeholder="Pesquisar número ou nome..."></div>
+    <div id="managementList" class="management-list"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px">
+      <button id="closeManagement">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <div id="editProductModal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head">
@@ -234,81 +241,94 @@ let editingProductId = null;
 
 function openEditProduct(p){
   editingProductId = p.id;
-  document.getElementById('editNumero').value = p.numero;
-  document.getElementById('editNome').value = p.nome || '';
-  document.getElementById('editMinimo').value = p.stock_minimo ?? 0;
-  document.getElementById('editProductModal').classList.remove('hidden');
+  $("editNumero").value = p.numero;
+  $("editNome").value = p.nome || "";
+  $("editMinimo").value = p.stock_minimo ?? 0;
+  $("editProductModal").classList.remove("hidden");
+}
+function openEditProductById(id){
+  const p = products.find(x=>x.id===id);
+  if(p) openEditProduct(p);
 }
 function closeEditProduct(){
   editingProductId = null;
-  document.getElementById('editProductModal').classList.add('hidden');
+  $("editProductModal").classList.add("hidden");
 }
 async function saveEditProduct(){
   if(!editingProductId) return;
-  const nome = document.getElementById('editNome').value.trim();
-  const stock_minimo = Math.max(0, parseInt(document.getElementById('editMinimo').value || '0',10));
-  const {error} = await sb.from('products').update({nome, stock_minimo}).eq('id', editingProductId);
+  const nome = $("editNome").value.trim();
+  const stock_minimo = Math.max(0, parseInt($("editMinimo").value || "0",10));
+  const {error} = await sb.from("products").update({nome, stock_minimo}).eq("id", editingProductId);
   if(error){ alert(error.message); return; }
   closeEditProduct();
-  if(typeof loadProducts === 'function') await loadProducts();
+  await loadProducts();
+  renderManagementList();
 }
-async function toggleProduct(p){
-  const action = p.ativo ? 'desativar' : 'ativar';
-  if(!confirm(`Tem a certeza que quer ${action} o produto ${p.numero}?`)) return;
-  const {error} = await sb.from('products').update({ativo: !p.ativo}).eq('id', p.id);
+
+async function toggleProductById(id){
+  const p = products.find(x=>x.id===id);
+  if(!p) return;
+  const action = p.ativo ? "desativar" : "ativar";
+  if(!confirm(`Tem a certeza que quer ${action} o número ${p.numero}?`)) return;
+  const {error} = await sb.from("products").update({ativo: !p.ativo}).eq("id", id);
   if(error){ alert(error.message); return; }
-  if(typeof loadProducts === 'function') await loadProducts();
+  await loadProducts();
+  renderManagementList();
 }
+
+function renderManagementList(){
+  const q = ($("managementSearch").value || "").trim().toLowerCase();
+  const list = products.filter(p =>
+    String(p.numero).includes(q) || (p.nome||"").toLowerCase().includes(q)
+  );
+  $("managementList").innerHTML = list.map(p => `
+    <div class="management-row">
+      <strong>${p.numero}</strong>
+      <div>
+        <div>${escapeHtml(p.nome || "Sem nome")}</div>
+        <span class="status-pill ${p.ativo ? "ok" : "low"}">${p.ativo ? "Ativo" : "Inativo"}</span>
+        · stock ${p.stock} · mínimo ${p.stock_minimo}
+      </div>
+      <div class="actions">
+        <button onclick="openEditProductById(${p.id})">Editar</button>
+        <button class="${p.ativo?'danger':''}" onclick="toggleProductById(${p.id})">${p.ativo?'Desativar':'Ativar'}</button>
+      </div>
+    </div>
+  `).join("") || `<div style="padding:14px" class="muted">Nenhum número encontrado.</div>`;
+}
+
+$("manageNumbersBtn").onclick = () => {
+  $("managementSearch").value = "";
+  $("managementModal").classList.remove("hidden");
+  renderManagementList();
+};
+$("closeManagement").onclick = () => $("managementModal").classList.add("hidden");
+$("managementSearch").oninput = renderManagementList;
+
+$("editProductModal").addEventListener("click", e => {
+  if(e.target.id==="editProductModal") closeEditProduct();
+});
+$("managementModal").addEventListener("click", e => {
+  if(e.target.id==="managementModal") $("managementModal").classList.add("hidden");
+});
 
 async function setupRealtime(){
   try{
-    sb.channel('gestao-stock-realtime')
-      .on('postgres_changes',{event:'*',schema:'public',table:'products'},()=>{
-        if(typeof loadProducts==='function') loadProducts();
+    sb.channel("gestao-stock-realtime")
+      .on("postgres_changes",{event:"*",schema:"public",table:"products"},()=>{
+        loadProducts();
+        if(!$("managementModal").classList.contains("hidden")) renderManagementList();
       })
-      .on('postgres_changes',{event:'INSERT',schema:'public',table:'stock_movements'},()=>{
-        if(typeof loadProducts==='function') loadProducts();
-        if(typeof loadHistory==='function') loadHistory();
+      .on("postgres_changes",{event:"INSERT",schema:"public",table:"stock_movements"},()=>{
+        loadProducts();
+        if(!$("historyTab").classList.contains("hidden")) loadHistory();
       })
       .subscribe();
-  }catch(e){ console.warn('Realtime:', e); }
+  }catch(e){ console.warn("Realtime:", e); }
 }
 
-function addManagementButtons(){
-  const tables = [...document.querySelectorAll('table')];
-  const table = tables.find(t => /Stock/i.test(t.innerText||'') && /Número|Numero/i.test(t.innerText||''));
-  if(!table) return;
-  const tbody = table.querySelector('tbody');
-  if(!tbody) return;
-
-  sb.from('products').select('*').order('numero').then(({data})=>{
-    if(!data) return;
-    [...tbody.rows].forEach(row=>{
-      const match = (row.innerText||'').match(/^\s*(\d{1,3})\b/);
-      if(!match) return;
-      const p = data.find(x=>String(x.numero)===match[1]);
-      if(!p || row.querySelector('.product-actions')) return;
-      const cell = row.lastElementChild || row.insertCell();
-      const box = document.createElement('div');
-      box.className='product-actions';
-      const edit = document.createElement('button');
-      edit.className='btn-small';
-      edit.textContent='Editar';
-      edit.onclick=()=>openEditProduct(p);
-      const toggle = document.createElement('button');
-      toggle.className='btn-small '+(p.ativo?'btn-danger':'btn-success');
-      toggle.textContent=p.ativo?'Desativar':'Ativar';
-      toggle.onclick=()=>toggleProduct(p);
-      box.append(edit,toggle);
-      cell.appendChild(box);
-    });
-  });
-}
-
-window.addEventListener('load',()=>{
+window.addEventListener("load",()=>{
   setTimeout(setupRealtime,1200);
-  setTimeout(addManagementButtons,1800);
-  setInterval(addManagementButtons,4000);
 });
 </script>
 </body>

@@ -9,3 +9,4 @@ Novidades:
 
 Publicação:
 Substitua o index.html da versão anterior pelo index.html deste ZIP no seu projeto Vercel.
+Versão 2 publicada
